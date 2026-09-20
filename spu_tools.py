@@ -11,6 +11,7 @@ tabs:
   3d        a model of the machine that tilts and opens with the real one
   ambient   temperature and light inside the case
   trackpad  Force Touch pressure sensors, and weight on the pad
+  sound     microphone: level, spectrum and the note you are playing
 
 nothing here makes any sound.
 
@@ -914,6 +915,7 @@ class TrackpadView(View):
         if self.pad.available:
             self.pad.start()
         self.offset = self.pad.pressure_offset
+        self.thresh_hi = 100.0          # grams; colours the contact map
         self.canvas.bind_all('<KeyPress-bracketright>',
                              lambda e: self._cycle(1))
         self.canvas.bind_all('<KeyPress-bracketleft>',
@@ -964,7 +966,51 @@ class TrackpadView(View):
                       text=f'full scale {mx:.0f} g (pad maximum)')
 
         # the raw field table, so the right one is obvious when you press
-        c.create_text(60, 282, anchor='w', fill=TEXT, font=('Menlo', 12, 'bold'),
+        # contact map: every finger as an ellipse, positioned and rotated the
+        # way the pad reports it
+        px0, py0, px1, py1 = 60, 282, 470, 430
+        c.create_rectangle(px0, py0, px1, py1, outline=GRID, fill=PANEL)
+        c.create_text(px0, py0 - 12, anchor='w', fill=DIM, font=('Menlo', 10),
+                      text='contact map (position, size and finger angle)')
+        gm = 10
+        for ct in s['contacts']:
+            cx = px0 + gm + ct['x'] * (px1 - px0 - 2 * gm)
+            cy = py0 + gm + (1.0 - ct['y']) * (py1 - py0 - 2 * gm)
+            major = ct.get('ellipsemajoraxisradius', 8.0)
+            minor = ct.get('ellipseminoraxisradius', 6.0)
+            ang = ct.get('ellipseorientationdegrees', 90.0)
+            f = 1.6
+            a = max(6.0, minor * f)
+            bb = max(6.0, major * f)
+            ux = math.cos(math.radians(ang)) * bb
+            uy = math.sin(math.radians(ang)) * bb
+            wx = -math.sin(math.radians(ang)) * a
+            wy = math.cos(math.radians(ang)) * a
+            pts = []
+            for t in range(0, 361, 30):
+                r = math.radians(t)
+                pts.extend((cx + ux * math.cos(r) + wx * math.sin(r),
+                            cy + uy * math.cos(r) + wy * math.sin(r)))
+            p_amt = ct['pressure']
+            col = GREEN if p_amt > self.thresh_hi else BLUE
+            c.create_polygon(*pts, outline=col, fill='', width=2)
+            c.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, fill=col, width=0)
+            c.create_text(cx, cy - bb - 9, text=f"{p_amt:.0f}g",
+                          fill=col, font=('Menlo', 9))
+
+        # per-finger list + total
+        ly = 296
+        c.create_text(500, ly - 14, anchor='w', fill=TEXT, font=('Menlo', 12, 'bold'),
+                      text='fingers')
+        c.create_text(500, ly, anchor='w', fill=ACCENT, font=('Menlo', 13, 'bold'),
+                      text=f"total {s['total']:6.1f} g")
+        for k, ct in enumerate(s['contacts'][:6]):
+            c.create_text(500, ly + 20 + k * 16, anchor='w', fill=DIM,
+                          font=('Menlo', 10),
+                          text=f"id{ct['id']:<3} {ct['pressure']:6.1f} g  "
+                               f"{ct.get('ellipseorientationdegrees', 0):5.1f}deg")
+
+        c.create_text(60, H - 84, anchor='w', fill=TEXT, font=('Menlo', 12, 'bold'),
                       text='all raw fields -- 52 is pressure, 60/64 are contact '
                            'size, 56 is a fixed angle')
         x = 60
@@ -1124,6 +1170,106 @@ class HeartbeatView(View):
             self.bpm, self.conf = None, 0.0
 
 
+
+class SoundView(View):
+    """microphone: level, spectrum, and the musical note being played.
+
+    The microphone is only opened when this tab is first shown -- the rest of
+    the app should not be listening. Analysis happens in memory; nothing is
+    recorded or stored.
+    """
+    title = 'sound'
+
+    def __init__(self, parent, hub):
+        super().__init__(parent, hub)
+        self.canvas.config(width=780, height=470)
+        import sound as snd
+        self.snd_mod = snd
+        self.snd = snd.Sound()
+        self.started = False
+
+    def start(self):
+        if not self.started:
+            self.started = True
+            self.snd.start()
+
+    def draw(self):
+        c = self.canvas
+        c.delete('all')
+        W, H = 780, 470
+        c.create_text(20, 26, anchor='w', fill=TEXT, font=('Menlo', 14, 'bold'),
+                      text='sound')
+        c.create_text(20, 48, anchor='w', fill=DIM, font=('Menlo', 11),
+                      text='listens through the microphone. play, sing or '
+                           'whistle and it names the note')
+
+        if not self.started:
+            c.create_text(W / 2, H / 2, text='open this tab to start listening',
+                          fill=DIM, font=('Menlo', 12))
+            return
+        if not self.snd.available:
+            c.create_text(30, 80, anchor='w', fill=RED, font=('Menlo', 12),
+                          text=f'microphone unavailable: {self.snd.error}')
+            return
+
+        d = self.snd.snapshot()
+        note = d['note']
+
+        # ---- tuner
+        if note:
+            cents = d['cents']
+            col = GREEN if abs(cents) < 8 else ACCENT
+            c.create_text(60, 130, anchor='w', fill=col,
+                          font=('Menlo', 56, 'bold'), text=note)
+            c.create_text(230, 118, anchor='w', fill=DIM, font=('Menlo', 12),
+                          text=f'{d["freq"]:.1f} Hz')
+            c.create_text(230, 138, anchor='w', fill=DIM, font=('Menlo', 12),
+                          text=f'{cents:+.0f} cents')
+            # tuning needle: in tune when the marker sits in the middle
+            nx0, nx1, ny = 60, 460, 185
+            c.create_line(nx0, ny, nx1, ny, fill=GRID, width=2)
+            c.create_line((nx0 + nx1) / 2, ny - 12, (nx0 + nx1) / 2, ny + 12,
+                          fill=GREEN, width=2)
+            for off in (-50, -25, 25, 50):
+                x = (nx0 + nx1) / 2 + off / 50.0 * (nx1 - nx0) / 2
+                c.create_line(x, ny - 6, x, ny + 6, fill=GRID)
+            mx = (nx0 + nx1) / 2 + max(-1, min(1, cents / 50.0)) * (nx1 - nx0) / 2
+            c.create_oval(mx - 7, ny - 7, mx + 7, ny + 7, fill=col, width=0)
+            c.create_text(nx0, ny + 24, anchor='w', fill=DIM, font=('Menlo', 10),
+                          text='-50 cents')
+            c.create_text(nx1, ny + 24, anchor='e', fill=DIM, font=('Menlo', 10),
+                          text='+50 cents')
+        else:
+            c.create_text(60, 130, anchor='w', fill=DIM, font=('Menlo', 30),
+                          text='listening...')
+
+        # ---- level meter
+        lx0, lx1, ly = 60, 700, 235
+        db = max(-70.0, min(0.0, d['level']))
+        c.create_rectangle(lx0, ly, lx1, ly + 20, outline=GRID, fill=PANEL)
+        c.create_rectangle(lx0, ly, lx0 + (lx1 - lx0) * (db + 70) / 70.0, ly + 20,
+                           fill=BLUE, width=0)
+        c.create_text(lx1 + 8, ly + 10, anchor='w', fill=DIM, font=('Menlo', 10),
+                      text=f'{d["level"]:.0f} dB')
+
+        # ---- spectrum bars
+        bx0, bx1, by0, by1 = 60, 700, 290, 420
+        c.create_text(bx0, by0 - 12, anchor='w', fill=DIM, font=('Menlo', 10),
+                      text='spectrum -- 40 Hz to 16 kHz, low on the left')
+        bars = d['bands']
+        n = len(bars)
+        bw = (bx1 - bx0) / n
+        for i, v in enumerate(bars):
+            hgt = (by1 - by0) * v / 100.0
+            x = bx0 + i * bw
+            col = ACCENT if v > 60 else (BLUE if v > 25 else '#2a3a52')
+            c.create_rectangle(x, by1 - hgt, x + bw - 1, by1, fill=col, width=0)
+        c.create_line(bx0, by1, bx1, by1, fill=GRID)
+        c.create_text(20, H - 22, anchor='w', fill=DIM, font=('Menlo', 10),
+                      text='nothing is recorded or saved. audio is analysed in '
+                           'memory and discarded.')
+
+
 # ---------------------------------------------------------------------- app
 
 class App:
@@ -1164,7 +1310,11 @@ class App:
             self.last_draw = now
             try:
                 idx = self.nb.index(self.nb.select())
-                self.views[idx].draw()
+                v = self.views[idx]
+                # the microphone is opened only once its tab is actually shown
+                if hasattr(v, 'start') and v.title == 'sound':
+                    v.start()
+                v.draw()
             except Exception:
                 pass
         self._after = self.root.after(12, self.pump)
@@ -1181,6 +1331,9 @@ class App:
                 pad = getattr(v, 'pad', None)
                 if pad is not None:
                     pad.stop()
+                snd = getattr(v, 'snd', None)
+                if snd is not None:
+                    snd.stop()
             self.hub.stop()
         finally:
             self.root.destroy()

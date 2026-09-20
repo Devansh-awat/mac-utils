@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>local.macutils.sound</string>
+  <key>CFBundleName</key><string>mac-utils sound probe</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>mac-utils listens through the microphone to show sound levels, a live spectrum and the musical note being played. Audio is analysed in memory only and never recorded, saved or sent anywhere.</string>
+</dict>
+</plist>

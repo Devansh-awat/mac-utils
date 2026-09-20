@@ -53,6 +53,52 @@ FIELD_CANDIDATES = (48, 52, 56, 60, 64, 68, 72, 76)
 DEFAULT_PRESSURE_OFFSET = 52
 PAD_MAX_GRAMS = 1000.0          # Force Touch rated maximum
 FINGER_RECORD_MIN = 80
+FINGER_RECORD_SIZE = 80      # stride between finger records in the array
+
+
+GEOMETRY_FNS = ('MTContact_getEllipseMajorAxisRadius',
+                'MTContact_getEllipseMinorAxisRadius',
+                'MTContact_getEllipseOrientationDegrees',
+                'MTContact_getEllipseEccentricity',
+                'MTContact_getEllipseMeanRadius',
+                'MTContact_getEllipseMajorAxisVector',
+                'MTContact_getCentroidPixel',
+                'MTContact_isActive')
+
+
+def _sane_state(v):
+    """The state field is occasionally uninitialised. Keep only sane values."""
+    return v if 0 <= v <= 15 else None
+
+
+def _resolve_geometry(mt):
+    """Bind the MTContact_get* accessors if this macOS exports them.
+
+    These take a pointer to one finger record and return a scalar describing
+    the contact's shape -- notably the ellipse orientation, i.e. which way the
+    finger is pointing, which the raw struct does not make obvious.
+    """
+    out = {}
+    # map the symbol to a ctypes type; the vectors return two floats packed in
+    # a struct we read as 8 bytes
+    types = {
+        'MTContact_getEllipseMajorAxisRadius': ctypes.c_float,
+        'MTContact_getEllipseMinorAxisRadius': ctypes.c_float,
+        'MTContact_getEllipseOrientationDegrees': ctypes.c_float,
+        'MTContact_getEllipseEccentricity': ctypes.c_float,
+        'MTContact_getEllipseMeanRadius': ctypes.c_float,
+        'MTContact_getCentroidPixel': ctypes.c_uint32,
+        'MTContact_isActive': ctypes.c_bool,
+    }
+    for name, rt in types.items():
+        try:
+            f = getattr(mt, name)
+            f.restype = rt
+            f.argtypes = [ctypes.c_void_p]
+            out[name] = f
+        except AttributeError:
+            pass
+    return out
 
 
 class Trackpad:
@@ -77,6 +123,9 @@ class Trackpad:
         self.frames = 0
         self.fields = {off: 0.0 for off in FIELD_CANDIDATES}
         self.pos = (0.0, 0.0)
+        self.contacts = []
+        self.total = 0.0
+        self._geo = {}
         self._mt = None
         self._cf = None
         self._cb = None            # MUST be kept alive: a collected callback
@@ -125,6 +174,38 @@ class Trackpad:
             return
 
         self._dev = cf.CFArrayGetValueAtIndex(devs, 0)
+        self._geo = _resolve_geometry(mt)
+        # the actuator is output, not input: it drives the Taptic Engine.
+        # it is reached via the device, not by device id.
+        self._haptic = {}
+        self.haptics_available = False
+        try:
+            mt.MTDeviceGetMTActuator.restype = ctypes.c_void_p
+            mt.MTDeviceGetMTActuator.argtypes = [ctypes.c_void_p]
+            act = mt.MTDeviceGetMTActuator(self._dev)
+            if act:
+                mt.MTActuatorRequestHostClickControl.restype = ctypes.c_bool
+                mt.MTActuatorRequestHostClickControl.argtypes = [ctypes.c_void_p]
+                mt.MTActuatorReclaimHostClickControl.restype = ctypes.c_bool
+                mt.MTActuatorReclaimHostClickControl.argtypes = [ctypes.c_void_p]
+                mt.MTActuatorActuate.restype = ctypes.c_bool
+                mt.MTActuatorActuate.argtypes = [
+                    ctypes.c_void_p, ctypes.c_int, ctypes.c_uint32,
+                    ctypes.c_float, ctypes.c_float]
+                self._haptic = {'act': act,
+                                'request': mt.MTActuatorRequestHostClickControl,
+                                'reclaim': mt.MTActuatorReclaimHostClickControl,
+                                'actuate': mt.MTActuatorActuate}
+                self.haptics_available = True
+        except AttributeError:
+            pass
+        self._dev_id = 0
+        try:
+            mt.MTDeviceGetDeviceID.restype = ctypes.c_uint64
+            mt.MTDeviceGetDeviceID.argtypes = [ctypes.c_void_p]
+            self._dev_id = mt.MTDeviceGetDeviceID(self._dev)
+        except Exception:
+            pass
         self._cb_type = ctypes.CFUNCTYPE(
             ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
             ctypes.c_int, ctypes.c_double, ctypes.c_int)
@@ -149,11 +230,40 @@ class Trackpad:
                         vals[off] = struct.unpack_from('<f', raw, off)[0]
                     px = struct.unpack_from('<f', raw, 32)[0]
                     py = struct.unpack_from('<f', raw, 36)[0]
+
+                    contacts = []
+                    for i in range(min(nfingers, 10)):
+                        fp = data + i * FINGER_RECORD_SIZE
+                        blob = ctypes.string_at(fp, FINGER_RECORD_SIZE)
+                        c = {
+                            'id': struct.unpack_from('<i', blob, 16)[0],
+                            # the state field reads as plausible small ints on
+                            # most frames but comes back as raw float bits on
+                            # others, so only keep it when it looks like a state
+                            'state': _sane_state(
+                                struct.unpack_from('<i', blob, 20)[0]),
+                            'x': struct.unpack_from('<f', blob, 32)[0],
+                            'y': struct.unpack_from('<f', blob, 36)[0],
+                            'vx': struct.unpack_from('<f', blob, 40)[0],
+                            'vy': struct.unpack_from('<f', blob, 44)[0],
+                            'pressure': struct.unpack_from('<f', blob, 52)[0],
+                        }
+                        for name, fn in self._geo.items():
+                            try:
+                                c[name.replace('MTContact_get', '').lower()] = fn(fp)
+                            except Exception:
+                                pass
+                        contacts.append(c)
+
                     with self.lock:
                         self.fields = vals
                         self.pos = (px, py)
                         self.nfingers = nfingers
+                        self.contacts = contacts
                         self.frames += 1
+                        # total force across all fingers on the pad
+                        self.total = sum(x['pressure'] for x in contacts
+                                         if 0.0 <= x['pressure'] < 5000.0)
                         p = vals.get(self.pressure_offset, 0.0)
                         if 0.0 <= p < 5000.0:      # guard a bad offset
                             self.pressure = p
@@ -163,6 +273,8 @@ class Trackpad:
                     with self.lock:
                         self.nfingers = 0
                         self.pressure = 0.0
+                        self.total = 0.0
+                        self.contacts = []
             except Exception:
                 pass
             return 0
@@ -196,6 +308,31 @@ class Trackpad:
                 break
             self.pump(0.1)
 
+    def click(self, style: str = 'weak') -> bool:
+        """Fire a haptic click on the trackpad.
+
+        Click control is taken from the system, used, and handed straight back.
+        Holding it would suppress the trackpad's own click feedback and make
+        the pad feel dead, so it is never held across calls.
+
+        style: 'weak' (1), 'strong' (2) or 'full' (6).
+        """
+        if not self.haptics_available:
+            return False
+        aid = {'weak': 1, 'strong': 2, 'full': 6}.get(style, 1)
+        h = self._haptic
+        try:
+            h['request'](h['act'])
+            ok = h['actuate'](h['act'], aid, 0, 0.1, 1.0)
+            h['reclaim'](h['act'])
+            return bool(ok)
+        except Exception:
+            try:
+                h['reclaim'](h['act'])
+            except Exception:
+                pass
+            return False
+
     def snapshot(self):
         with self.lock:
             return {
@@ -205,6 +342,8 @@ class Trackpad:
                 'frames': self.frames,
                 'fields': dict(self.fields),
                 'pos': self.pos,
+                'contacts': list(self.contacts),
+                'total': self.total,
             }
 
     def reset_peak(self):

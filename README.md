@@ -15,7 +15,8 @@ Everything here is read-only and makes no sound.
 |---|---|
 | `spu_tools.py` | the main app — one window, eight tabs, everything live |
 | `angle_meter.py` | minimal: just the screen angle, two numbers and a diagram |
-| `trackpad.py` | Force Touch pressure readings, also runnable standalone as a calibration tool |
+| `trackpad.py` | Force Touch pressure and haptics, runnable standalone as a calibration tool |
+| `sound.py` | microphone analysis, runnable standalone as a terminal tuner |
 | `macimu/` | the sensor-reading library (see [credits](#credits)) |
 
 ## requirements
@@ -24,9 +25,11 @@ Everything here is read-only and makes no sound.
 - macOS 15 or newer. Tested on macOS 27.2.
 - Python 3.9+
 - **Tkinter** — Homebrew's Python ships without it: `brew install python-tk@3.14`
-- **Swift toolchain** for the CoreHID helper — comes with Xcode Command Line
+- **Swift toolchain** for the sensor helper — comes with Xcode Command Line
   Tools (`xcode-select --install`). Without it the app falls back to a slower
   pure-Python path.
+- **Microphone access**, only if you open the sound tab. macOS prompts the first
+  time. Nothing is recorded.
 
 ## install and run
 
@@ -57,7 +60,8 @@ root; if you are on one, the app tells you rather than failing silently.
 | **heartbeat** | ballistocardiogram — rest your wrists on the machine and it finds your pulse |
 | **3d** | a model of the machine that tilts, turns and opens with the real one |
 | **ambient** | temperature and light inside the case |
-| **trackpad** | Force Touch pressure in grams, plus every raw sensor field |
+| **trackpad** | Force Touch pressure in grams, every raw sensor field, a contact map, and haptic clicks |
+| **sound** | microphone: level, 40-band spectrum, and the note you are playing |
 
 Keys, where a tab has them: `↑`/`↓` (knock threshold), `[`/`]` (trackpad field),
 `r` (reset peak), `x`/`y`/`s` (3d sensor axis mapping).
@@ -90,6 +94,45 @@ and `wakehint` enumerate and open but never emit a single report. Tested
 several ways — subscribing alongside active accel/gyro, seizing the device,
 reading feature reports, writing the reporting properties. Property writes come
 back `kIOReturnUnsupported`. They appear to be inert.
+
+## the sound tab
+
+Opens the microphone **only when you actually open that tab** — the rest of the
+app is not listening. Capture and a 4096-point FFT run in Swift via vDSP
+(`_sound.swift`); doing that in pure Python would not keep up. Results stream to
+`sound.py`.
+
+It is a tuner. Play a note, sing, or whistle and it names the pitch with the
+deviation in cents. Detection needs the spectral peak to clear both a ratio test
+against the rest of the spectrum *and* a floor that adapts to your room's own
+noise — a fixed threshold either names a note for room hum or goes deaf to quiet
+playing.
+
+Audio is analysed in memory and discarded; nothing is recorded, saved or sent.
+The build embeds an `NSMicrophoneUsageDescription` in the helper binary, without
+which macOS kills the process on launch.
+
+## haptics
+
+The trackpad has no moving parts. The click you feel is a **linear resonant
+actuator** — the Taptic Engine — shaking the glass. It is output, not input:
+nothing is measured, hardware is driven.
+
+```python
+pad = Trackpad(); pad.start()
+pad.click('weak')      # or 'strong', 'full'
+```
+
+The one place in this project that **writes** to hardware rather than reading it.
+
+The catch, which cost real time: actuation silently returns `False` until you
+call `MTActuatorRequestHostClickControl` first. That control must then be handed
+back with `MTActuatorReclaimHostClickControl`, or the system's own click feedback
+stays suppressed and the trackpad feels dead. `click()` takes control, actuates,
+and hands it straight back — it never holds it.
+
+Also: the actuator is reached through the *device* (`MTDeviceGetMTActuator`), not
+by device id — `MTActuatorCreateFromDeviceID` returns null.
 
 ## the trackpad
 
