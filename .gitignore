@@ -1,0 +1,18 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# the compiled CoreHID helper -- built on demand from _spu_hid.swift,
+# so it is machine specific and must not be committed
+macimu/bin/
+
+# logs written by the tools
+vibration_log_*.json
+
+# macOS
+.DS_Store

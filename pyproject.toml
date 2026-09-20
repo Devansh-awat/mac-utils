@@ -1,0 +1,28 @@
+[project]
+name = "mac-utils"
+version = "0.1.0"
+license = { text = "AGPL-3.0-or-later" }
+description = "Tools for the undocumented sensors inside Apple Silicon Macs"
+requires-python = ">=3.9"
+dependencies = []
+readme = "README.md"
+classifiers = [
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+
+[project.urls]
+Homepage = "https://github.com/Devansh-awat/mac-utils"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["macimu*"]
+
+# the Swift source for the CoreHID helper must ship with the package,
+# since it is compiled on demand at first run
+[tool.setuptools.package-data]
+macimu = ["*.swift"]
